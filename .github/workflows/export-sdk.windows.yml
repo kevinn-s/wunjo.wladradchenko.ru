@@ -1,0 +1,99 @@
+name: Export Windows Development SDK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CRAFT_ROOT: C:\CraftRoot
+  CRAFT_ABI: windows-cl-msvc2022-x86_64
+
+jobs:
+  export-sdk:
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - name: Restore Craft dependency cache
+        uses: actions/cache/restore@v4
+        id: craft-cache
+        with:
+          path: |
+            ${{ env.CRAFT_ROOT }}
+            !${{ env.CRAFT_ROOT }}/build
+            !${{ env.CRAFT_ROOT }}/download
+          key: craft-${{ env.CRAFT_ABI }}-sdk-export
+          restore-keys: |
+            craft-${{ env.CRAFT_ABI }}-
+
+      - name: Verify Craft cache was restored
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ("${{ steps.craft-cache.outputs.cache-matched-key }}" -eq "") {
+              throw "No Craft cache was found."
+          }
+
+          Write-Host "Restored cache:"
+          Write-Host "${{ steps.craft-cache.outputs.cache-matched-key }}"
+
+          if (-not (Test-Path "$env:CRAFT_ROOT\craft\craftenv.ps1")) {
+              throw "CraftRoot is incomplete: craftenv.ps1 is missing."
+          }
+
+          if (-not (Test-Path "$env:CRAFT_ROOT\include")) {
+              throw "CraftRoot is incomplete: include directory is missing."
+          }
+
+          if (-not (Test-Path "$env:CRAFT_ROOT\lib")) {
+              throw "CraftRoot is incomplete: lib directory is missing."
+          }
+
+          Write-Host "CraftRoot successfully restored."
+
+      - name: Show Craft configuration
+        shell: pwsh
+        run: |
+          Get-Content "$env:CRAFT_ROOT\etc\CraftSettings.ini"
+
+      - name: Create SDK archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $archive = "$env:RUNNER_TEMP\wunjo-sdk-msvc2022-x64.7z"
+
+          & "C:\Program Files\7-Zip\7z.exe" `
+              a `
+              -t7z `
+              -mx=3 `
+              $archive `
+              "$env:CRAFT_ROOT\*"
+
+          if (-not (Test-Path $archive)) {
+              throw "SDK archive was not created."
+          }
+
+          $hash = Get-FileHash $archive -Algorithm SHA256
+
+          $hash.Hash |
+              Set-Content "$archive.sha256" -Encoding ascii
+
+          Write-Host "SDK archive:"
+          Write-Host $archive
+          Write-Host "SHA256:"
+          Write-Host $hash.Hash
+
+      - name: Upload development SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: wunjo-sdk-msvc2022-x64
+          path: |
+            ${{ runner.temp }}/wunjo-sdk-msvc2022-x64.7z
+            ${{ runner.temp }}/wunjo-sdk-msvc2022-x64.7z.sha256
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
