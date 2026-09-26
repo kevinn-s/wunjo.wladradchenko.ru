@@ -267,7 +267,8 @@ public:
         hint.setWidth(width);
         int type = index.data(AbstractProjectItem::ItemTypeRole).toInt();
         if (type == AbstractProjectItem::FolderItem) {
-            return QSize(hint.width(), qMin(option.fontMetrics.lineSpacing() + 4, hint.height()));
+            const QFontMetrics folderMetrics(ft);
+            return QSize(hint.width(), qMax(folderMetrics.height(), folderMetrics.lineSpacing()) + 4);
         }
         if (type == AbstractProjectItem::ClipItem) {
             return QSize(hint.width(), qMax(option.fontMetrics.lineSpacing() * 2 + 4, qMax(hint.height(), option.decorationSize.height())));
@@ -305,7 +306,7 @@ public:
                 painter->setPen(option.palette.text().color());
             }
             QRect r = r1;
-            QFont font = painter->font();
+            QFont font = option.font;
             font.setBold(true);
             painter->setFont(font);
             if (type == AbstractProjectItem::ClipItem || type == AbstractProjectItem::SubClipItem || type == AbstractProjectItem::SubSequenceItem) {
@@ -496,7 +497,7 @@ public:
                 }
                 r1.adjust(decoWidth, 0, 0, 0);
                 QRectF bounding;
-                painter->drawText(r1, Qt::AlignLeft | Qt::AlignTop, index.data(AbstractProjectItem::DataName).toString(), &bounding);
+                painter->drawText(r1, Qt::AlignLeft | Qt::AlignVCenter, index.data(AbstractProjectItem::DataName).toString(), &bounding);
             }
             painter->restore();
         } else if (index.column() == 7) {

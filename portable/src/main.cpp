@@ -251,7 +251,7 @@ int main(int argc, char *argv[])
     qputenv("MLT_REPOSITORY_DENY", "libmltqt:libmltglaxnimate");
 
 #if defined(Q_OS_WIN)
-    QGuiApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::RoundPreferFloor);
+    QGuiApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::Round);
 #endif
     // TODO: is it a good option ?
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts, true);
@@ -297,6 +297,13 @@ int main(int argc, char *argv[])
     // there.
     QIcon::setFallbackThemeName(QStringLiteral("breeze"));
 
+    QIcon::setThemeName(QStringLiteral("wunjo"));
+    KIconTheme::forceThemeForTests(QStringLiteral("wunjo"));
+#elif defined(Q_OS_WIN)
+    QIcon::setThemeSearchPaths(QStringList{QCoreApplication::applicationDirPath() + QStringLiteral("/data/icons"),
+                                         QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/../share/icons"))}
+                               + QIcon::themeSearchPaths());
+    QIcon::setFallbackThemeName(QStringLiteral("breeze"));
     QIcon::setThemeName(QStringLiteral("wunjo"));
     KIconTheme::forceThemeForTests(QStringLiteral("wunjo"));
 #else
@@ -348,6 +355,11 @@ int main(int argc, char *argv[])
                        ? QStringLiteral("Breeze")
                        : QStringLiteral("Fusion");
 #endif
+#ifdef Q_OS_WIN
+        baseName = QStyleFactory::keys().contains(QStringLiteral("Breeze"), Qt::CaseInsensitive)
+                       ? QStringLiteral("Breeze")
+                       : QStringLiteral("Fusion");
+#endif
         widgetStyleName = baseName;
         qApp->setStyle(new WunjoProxyStyle(baseName));
     }
@@ -361,18 +373,25 @@ int main(int argc, char *argv[])
         // ~/Library/Application Support and never the bundle, and inside the
         // bundle the directory is Contents/Resources/fonts with no wunjo in it.
         // The failure is silent — the interface simply draws in the system font.
-        const QString wunjoFontsDir =
+        QString wunjoFontsDir =
             QStandardPaths::locate(QStandardPaths::AppDataLocation, QStringLiteral("fonts"), QStandardPaths::LocateDirectory);
+#ifdef Q_OS_WIN
+        const QString installedFonts = QCoreApplication::applicationDirPath() + QStringLiteral("/data/wunjo/fonts");
+        if (QDir(installedFonts).exists()) {
+            wunjoFontsDir = installedFonts;
+        }
+#endif
         if (!wunjoFontsDir.isEmpty()) {
             QDirIterator fontIt(wunjoFontsDir, {QStringLiteral("*.ttf"), QStringLiteral("*.otf")}, QDir::Files, QDirIterator::Subdirectories);
             while (fontIt.hasNext()) {
                 QFontDatabase::addApplicationFont(fontIt.next());
             }
         }
-        const QString wunjoUiFont = QStringLiteral("Zen Maru Gothic");
+        const QString wunjoUiFont = QStringLiteral("Inter");
         if (QFontDatabase::families().contains(wunjoUiFont)) {
             QFont wunjoFont(wunjoUiFont);
             wunjoFont.setWeight(QFont::Medium);
+            wunjoFont.setHintingPreference(QFont::PreferNoHinting);
             qApp->setFont(wunjoFont);
         }
     }
@@ -584,6 +603,8 @@ int main(int argc, char *argv[])
         // here means the sheet is decorating something it was not written for,
         // and the interface comes out wrong in ways no packaging check can see.
         report[QStringLiteral("widgetStyle")] = widgetStyleName;
+        report[QStringLiteral("fontFamily")] = qApp->font().family();
+        report[QStringLiteral("bundledFontAvailable")] = QFontDatabase::families().contains(QStringLiteral("Inter"));
         const QString outputFilename = parser.value(saveDebugOption);
         if (!outputFilename.isEmpty()) {
             QFile file(outputFilename);
