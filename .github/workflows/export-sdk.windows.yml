@@ -1,4 +1,4 @@
-name: Build Windows Craft Dependency SDK
+name: Build Full Windows Development SDK
 
 on:
   workflow_dispatch:
@@ -10,118 +10,177 @@ env:
   CRAFT_ROOT: C:\CraftRoot
   CRAFT_ABI: windows-cl-msvc2022-x86_64
 
-  # This is NOT CraftRoot.
-  # Craft places only locally-created binary cache packages here.
+  # Supplemental Craft cache.
+  #
+  # KDE already provides most Wunjo dependencies as binary packages.
+  # Packages missing from KDE's cache are built on GitHub and stored here.
   CRAFT_BINARY_CACHE: ${{ github.workspace }}\craft-binary-cache
 
-  # ownCloud uses Craft's shelf mechanism to record the exact installed
-  # dependency versions. We do the same for Wunjo.
+  # Exact dependency versions installed by this workflow.
   CRAFT_SHELF: ${{ github.workspace }}\wunjo-windows.craft.shelf
+
 
 jobs:
   dependency-sdk:
-    name: Build Wunjo dependency cache
+    name: Build complete local Wunjo SDK
+
     runs-on: windows-2022
-    timeout-minutes: 180
+
+    # Dependency installation + maximum-compression SDK creation can take time.
+    timeout-minutes: 240
 
     steps:
+      # -----------------------------------------------------------------------
+      # Source
+      # -----------------------------------------------------------------------
+
       - name: Checkout Wunjo
         uses: actions/checkout@v4
+
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
 
-      # Same Windows/Craft cleanup used by Wunjo's successful build.
-      # Git's sh.exe, Strawberry Perl and the preinstalled MinGW can interfere
-      # with a Craft MSVC environment.
+
+      # -----------------------------------------------------------------------
+      # Prepare Windows environment
+      # -----------------------------------------------------------------------
+
+      # Craft's MSVC environment is sensitive to sh.exe, MinGW and Strawberry
+      # Perl from the GitHub runner appearing before Craft's own tools.
       - name: Clean conflicting tools from PATH
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $env:PATH = ($env:PATH -split ';' | Where-Object {
-            $_ -notmatch 'mingw' -and
-            $_ -notmatch 'Strawberry' -and
-            $_ -notmatch 'Git\\bin'
-          }) -join ';'
+          $env:PATH = (
+              $env:PATH -split ';' |
+              Where-Object {
+                  $_ -notmatch 'mingw' -and
+                  $_ -notmatch 'Strawberry' -and
+                  $_ -notmatch 'Git\\bin'
+              }
+          ) -join ';'
 
           "PATH=$env:PATH" |
-            Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+              Out-File `
+                  -Append `
+                  -Encoding utf8 `
+                  $env:GITHUB_ENV
 
-          foreach ($tool in @('sh', 'gcc', 'g++', 'cpp')) {
-            $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+          Write-Host '=== PATH conflict check ==='
 
-            if ($cmd) {
-              Write-Host "$tool still on PATH: $($cmd.Source)"
-            }
-            else {
-              Write-Host "$tool removed from PATH"
-            }
+          foreach ($tool in @(
+              'sh',
+              'gcc',
+              'g++',
+              'cpp'
+          )) {
+              $cmd = Get-Command `
+                  $tool `
+                  -ErrorAction SilentlyContinue
+
+              if ($cmd) {
+                  Write-Host (
+                      "$tool still on PATH: " +
+                      $cmd.Source
+                  )
+              }
+              else {
+                  Write-Host "$tool removed from PATH"
+              }
           }
 
-          Write-Host "git: $((Get-Command git).Source)"
+          Write-Host (
+              "git: " +
+              (Get-Command git).Source
+          )
 
-      # Use the same Craft source/bootstrap arrangement that already produced
-      # a successful Wunjo build on this repository.
+
+      # -----------------------------------------------------------------------
+      # Bootstrap KDE Craft
+      # -----------------------------------------------------------------------
+
       - name: Fetch KDE Craft
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
           Invoke-WebRequest `
-            -Uri https://raw.githubusercontent.com/KDE/craft/master/setup/CraftBootstrap.py `
-            -OutFile CraftBootstrap.py
+              -Uri https://raw.githubusercontent.com/KDE/craft/master/setup/CraftBootstrap.py `
+              -OutFile CraftBootstrap.py
 
           git clone `
-            --depth 1 `
-            --branch master `
-            https://github.com/KDE/craft.git `
-            craft-src
+              --depth 1 `
+              --branch master `
+              https://github.com/KDE/craft.git `
+              craft-src
 
-      # GitHub's windows-2022 runner defines ANDROID_SDK_ROOT.
-      # Craft checks only whether that variable EXISTS, which can otherwise
-      # incorrectly select Android's MinSizeRel build type.
+
+      # GitHub's Windows runner exposes Android environment variables.
+      #
+      # Craft's bootstrap checks for ANDROID_SDK_ROOT and can otherwise choose
+      # Android's MinSizeRel configuration even though the selected platform is
+      # Windows.
+      #
+      # KDE's Windows binary cache is under RelWithDebInfo, so remove these
+      # variables before bootstrapping.
       - name: Bootstrap Craft for MSVC 2022
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Remove-Item Env:ANDROID_SDK_ROOT -ErrorAction SilentlyContinue
-          Remove-Item Env:ANDROID_HOME -ErrorAction SilentlyContinue
+          Remove-Item `
+              Env:ANDROID_SDK_ROOT `
+              -ErrorAction SilentlyContinue
+
+          Remove-Item `
+              Env:ANDROID_HOME `
+              -ErrorAction SilentlyContinue
 
           python CraftBootstrap.py `
-            --prefix $env:CRAFT_ROOT `
-            --branch master `
-            --use-defaults `
-            --localDev craft-src
+              --prefix $env:CRAFT_ROOT `
+              --branch master `
+              --use-defaults `
+              --localDev craft-src
 
-      # Configure Craft in the same conceptual way ownCloud does:
+
+      # -----------------------------------------------------------------------
+      # Configure ownCloud-style Craft binary cache
+      # -----------------------------------------------------------------------
+
+      # Strategy:
       #
-      #   UseCache    = consume prebuilt binary packages
-      #   CreateCache = package anything that had to be built locally
+      #   KDE package exists
+      #        ↓
+      #   download prebuilt binary
       #
-      # Therefore:
+      #   KDE package missing
+      #        ↓
+      #   build ON GITHUB
+      #        ↓
+      #   create supplemental binary package
       #
-      # KDE cache hit  -> download it, don't duplicate it in our artifact.
-      # KDE cache miss -> GitHub builds it and Craft stores a binary package
-      #                   in CRAFT_BINARY_CACHE.
+      # Nothing should later need to compile on the user's PC.
       - name: Configure Craft binary cache
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
           New-Item `
-            -ItemType Directory `
-            -Force `
-            -Path $env:CRAFT_BINARY_CACHE |
-            Out-Null
+              -ItemType Directory `
+              -Force `
+              -Path $env:CRAFT_BINARY_CACHE |
+              Out-Null
 
           $script = @'
           import configparser
           import os
+
           from pathlib import Path
+
 
           settings_path = (
               Path(os.environ["CRAFT_ROOT"])
@@ -129,9 +188,17 @@ jobs:
               / "CraftSettings.ini"
           )
 
+
           config = configparser.RawConfigParser()
+
+          # Preserve Craft's case-sensitive keys.
           config.optionxform = str
-          config.read(settings_path, encoding="utf-8")
+
+          config.read(
+              settings_path,
+              encoding="utf-8",
+          )
+
 
           values = {
               "General": {
@@ -145,55 +212,66 @@ jobs:
               "ContinuousIntegration": {
                   "Enabled": "False",
 
-                  # We are building our own supplemental repository.
-                  # Do not merge the remote KDE manifest into it.
+                  # We are constructing our own supplemental cache rather
+                  # than modifying KDE's remote repository.
                   "UpdateRepository": "False",
               },
 
               "Packager": {
-                  # First try a binary package.
+                  # Consume KDE's binary cache.
                   "UseCache": "True",
 
-                  # If one does not exist and Craft builds the dependency,
-                  # make a binary package from that result.
+                  # When KDE has no package, build it on GitHub and package
+                  # that result into CRAFT_BINARY_CACHE.
                   "CreateCache": "True",
 
                   "CacheDir": Path(
                       os.environ["CRAFT_BINARY_CACHE"]
                   ).as_posix(),
 
-                  # Development symbols/sources would make the dependency
-                  # artifact much larger and are not needed for our Wunjo
-                  # incremental-build setup.
+                  # Don't inflate the SDK with dependency debugging data.
                   "PackageDebugSymbols": "False",
+                  "DownloadDebugSymbolsCache": "False",
                   "PackageSrc": "False",
               },
           }
 
+
           for section, options in values.items():
+
               if not config.has_section(section):
                   config.add_section(section)
 
               for key, value in options.items():
-                  config.set(section, key, value)
+                  config.set(
+                      section,
+                      key,
+                      value,
+                  )
+
 
           with settings_path.open(
               "w",
               encoding="utf-8",
           ) as handle:
+
               config.write(handle)
           '@
 
+
           $script | python -
 
+
+          Write-Host ''
           Write-Host '=== Effective Craft settings ==='
 
           Select-String `
-            -Path "$env:CRAFT_ROOT\etc\CraftSettings.ini" `
-            -Pattern '^(ABI|BuildType|UseCache|CreateCache|CacheDir|PackageDebugSymbols)\s*=' |
-            ForEach-Object {
-              Write-Host $_.Line
-            }
+              -Path "$env:CRAFT_ROOT\etc\CraftSettings.ini" `
+              -Pattern '^(ABI|BuildType|UseCache|CreateCache|CacheDir|PackageDebugSymbols|DownloadDebugSymbolsCache)\s*=' |
+              ForEach-Object {
+                  Write-Host $_.Line
+              }
+
 
       - name: Verify Craft ABI
         shell: pwsh
@@ -201,178 +279,1363 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           $match = Select-String `
-            -Path "$env:CRAFT_ROOT\etc\CraftSettings.ini" `
-            -Pattern '^ABI\s*=\s*(.+)$'
+              -Path "$env:CRAFT_ROOT\etc\CraftSettings.ini" `
+              -Pattern '^ABI\s*=\s*(.+)$'
+
 
           if (-not $match) {
-            throw 'Craft ABI is missing from CraftSettings.ini.'
+              throw (
+                  'Craft ABI is missing from ' +
+                  'CraftSettings.ini.'
+              )
           }
 
-          $abi = $match.Matches.Groups[1].Value.Trim()
+
+          $abi = (
+              $match.Matches.Groups[1].Value.Trim()
+          )
+
 
           Write-Host "Craft ABI: $abi"
 
+
           if ($abi -ne $env:CRAFT_ABI) {
-            throw "Craft ABI is '$abi'; expected '$env:CRAFT_ABI'."
+              throw (
+                  "Craft ABI is '$abi'; expected " +
+                  "'$env:CRAFT_ABI'."
+              )
           }
 
-      # Wunjo carries its own Craft blueprint repository inside portable/.
+
+      # -----------------------------------------------------------------------
+      # Register Wunjo's local Craft blueprint
+      # -----------------------------------------------------------------------
+
       - name: Register Wunjo Craft blueprints
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
           python `
-            portable\packaging\craft\register-blueprint.py
+              portable\packaging\craft\register-blueprint.py
 
-      # This is the important step.
+
+      # -----------------------------------------------------------------------
+      # Install ALL development dependencies
+      # -----------------------------------------------------------------------
+
+      # Important:
       #
-      # --install-deps means Wunjo itself is NOT built.
+      # --install-deps deliberately excludes Wunjo itself.
       #
-      # --use-cache means Craft first tries KDE's official cache.
+      # This workflow installs:
       #
-      # --create-cache means a dependency which is missing from KDE's cache is
-      # built on the GitHub runner and converted into a reusable Craft binary
-      # package.
-      - name: Build Wunjo dependencies
+      #   Qt
+      #   KF6
+      #   FFmpeg
+      #   MLT
+      #   OpenCV
+      #   KDDockWidgets
+      #   OpenTimelineIO
+      #   Frei0r
+      #   etc.
+      #
+      # KDE cache hits are downloaded.
+      # Cache misses are compiled ON GITHUB.
+      - name: Install every Wunjo dependency
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # craftenv.ps1 clears the console. GitHub's non-interactive
-          # PowerShell does not provide the console handle Clear-Host expects.
+          # craftenv.ps1 calls Clear-Host.
+          # GitHub's PowerShell step has no normal interactive console.
           function Clear-Host {}
+
 
           & "$env:CRAFT_ROOT\craft\craftenv.ps1"
 
-          craft `
-            --ci-mode `
-            --use-cache `
-            --create-cache `
-            --install-deps `
-            --options "wunjo.srcDir=$env:GITHUB_WORKSPACE\portable" `
-            wunjo
 
-      # This is directly based on ownCloud's approach.
+          craft `
+              --ci-mode `
+              --use-cache `
+              --create-cache `
+              --install-deps `
+              --options "wunjo.srcDir=$env:GITHUB_WORKSPACE\portable" `
+              wunjo
+
+
+      # -----------------------------------------------------------------------
+      # Record exact dependency state
+      # -----------------------------------------------------------------------
+
+      # Based on ownCloud's Craft workflow approach.
       #
-      # The shelf records exact installed package versions/revisions rather
-      # than shipping the installed CraftRoot filesystem.
-      - name: Create Craft dependency shelf
+      # Keep a shelf even though the main output will be a complete installed
+      # CraftRoot. It gives us a reproducible record of every dependency.
+      - name: Create exact dependency shelf
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
           function Clear-Host {}
 
+
           & "$env:CRAFT_ROOT\craft\craftenv.ps1"
 
-          craft `
-            --ci-mode `
-            --shelve "$env:CRAFT_SHELF"
 
           craft `
-            --ci-mode `
-            --print-installed |
-            Set-Content `
-              "$env:GITHUB_WORKSPACE\installed-packages.txt" `
-              -Encoding utf8
+              --ci-mode `
+              --shelve "$env:CRAFT_SHELF"
 
-          Write-Host '=== Shelf ==='
+
+          craft `
+              --ci-mode `
+              --print-installed |
+              Set-Content `
+                  "$env:GITHUB_WORKSPACE\installed-packages.txt" `
+                  -Encoding utf8
+
+
+          Write-Host ''
+          Write-Host '=== Craft shelf ==='
+
           Get-Content $env:CRAFT_SHELF
 
-      # We expect Craft's cache to have the following conceptual layout:
-      #
-      # craft-binary-cache/
-      #   26.05/
-      #     windows/
-      #       cl/
-      #         msvc2022/
-      #           x86_64/
-      #             RelWithDebInfo/
-      #               manifest.json
-      #               ...
-      #
-      # Only packages KDE did not already provide need to appear here.
-      - name: Verify dependency SDK
+
+      # -----------------------------------------------------------------------
+      # Verify supplemental cache
+      # -----------------------------------------------------------------------
+
+      - name: Verify supplemental Craft cache
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
+
           if (-not (Test-Path $env:CRAFT_SHELF)) {
-            throw 'Craft shelf was not created.'
+              throw 'Craft shelf was not created.'
           }
 
-          $manifest = Get-ChildItem `
-            -Path $env:CRAFT_BINARY_CACHE `
-            -Filter manifest.json `
-            -Recurse `
-            -File |
-            Select-Object -First 1
+
+          $manifest = (
+              Get-ChildItem `
+                  -Path $env:CRAFT_BINARY_CACHE `
+                  -Filter manifest.json `
+                  -Recurse `
+                  -File |
+              Select-Object -First 1
+          )
+
 
           if (-not $manifest) {
-            throw 'No Craft binary-cache manifest was created.'
+              throw (
+                  'No supplemental Craft cache manifest ' +
+                  'was created.'
+              )
           }
 
+
           $archives = @(
-            Get-ChildItem `
-              -Path $env:CRAFT_BINARY_CACHE `
-              -Filter *.7z `
-              -Recurse `
-              -File
+              Get-ChildItem `
+                  -Path $env:CRAFT_BINARY_CACHE `
+                  -Filter *.7z `
+                  -Recurse `
+                  -File
           )
 
-          Write-Host "Binary cache manifest:"
-          Write-Host $manifest.FullName
-
-          Write-Host (
-            "Supplemental binary packages: {0}" -f
-            $archives.Count
-          )
 
           $bytes = (
-            Get-ChildItem `
-              -Path $env:CRAFT_BINARY_CACHE `
-              -Recurse `
-              -File |
-            Measure-Object `
-              -Property Length `
-              -Sum
+              Get-ChildItem `
+                  -Path $env:CRAFT_BINARY_CACHE `
+                  -Recurse `
+                  -File |
+              Measure-Object `
+                  -Property Length `
+                  -Sum
           ).Sum
 
+
           Write-Host (
-            "Supplemental cache size: {0:N2} MiB" -f
-            ($bytes / 1MB)
+              "Binary cache manifest: " +
+              $manifest.FullName
           )
 
-      - name: Write SDK metadata
+          Write-Host (
+              "Supplemental archives: " +
+              $archives.Count
+          )
+
+          Write-Host (
+              "Supplemental cache size: {0:N2} MiB" -f
+              ($bytes / 1MB)
+          )
+
+
+      # -----------------------------------------------------------------------
+      # Remove GitHub-runner-specific paths
+      # -----------------------------------------------------------------------
+
+      # register-blueprint.py placed an absolute GitHub workspace path in
+      # CraftSettings.ini.
+      #
+      # CacheDir also points into the temporary GitHub workspace.
+      #
+      # Neither path should ship to the local PC.
+      - name: Make CraftRoot portable to C drive
         shell: pwsh
         run: |
-          @{
-            abi = $env:CRAFT_ABI
-            buildType = 'RelWithDebInfo'
-            wunjoCommit = $env:GITHUB_SHA
-            repository = $env:GITHUB_REPOSITORY
-            createdUtc = [DateTime]::UtcNow.ToString('o')
-            purpose = 'Wunjo local-development Craft dependency cache'
-          } |
-            ConvertTo-Json |
-            Set-Content `
-              "$env:GITHUB_WORKSPACE\sdk-info.json" `
-              -Encoding utf8
+          $ErrorActionPreference = 'Stop'
 
-      # Do NOT archive C:\CraftRoot.
+
+          $script = @'
+          import configparser
+          import os
+
+          from pathlib import Path
+
+
+          settings_path = (
+              Path(os.environ["CRAFT_ROOT"])
+              / "etc"
+              / "CraftSettings.ini"
+          )
+
+
+          config = configparser.RawConfigParser()
+
+          config.optionxform = str
+
+          config.read(
+              settings_path,
+              encoding="utf-8",
+          )
+
+
+          # This currently points into GITHUB_WORKSPACE.
+          if config.has_section("Blueprints"):
+              config.remove_option(
+                  "Blueprints",
+                  "Locations",
+              )
+
+
+          # This currently points into GITHUB_WORKSPACE.
+          if config.has_section("Packager"):
+
+              config.remove_option(
+                  "Packager",
+                  "CacheDir",
+              )
+
+              config.set(
+                  "Packager",
+                  "UseCache",
+                  "True",
+              )
+
+              config.set(
+                  "Packager",
+                  "CreateCache",
+                  "False",
+              )
+
+              config.set(
+                  "Packager",
+                  "DownloadDebugSymbolsCache",
+                  "False",
+              )
+
+              config.set(
+                  "Packager",
+                  "PackageDebugSymbols",
+                  "False",
+              )
+
+              config.set(
+                  "Packager",
+                  "PackageSrc",
+                  "False",
+              )
+
+
+          for section in (
+              "General",
+              "Compile",
+              "ContinuousIntegration",
+          ):
+
+              if not config.has_section(section):
+                  config.add_section(section)
+
+
+          config.set(
+              "General",
+              "ABI",
+              os.environ["CRAFT_ABI"],
+          )
+
+          config.set(
+              "Compile",
+              "BuildType",
+              "RelWithDebInfo",
+          )
+
+          config.set(
+              "ContinuousIntegration",
+              "Enabled",
+              "False",
+          )
+
+
+          with settings_path.open(
+              "w",
+              encoding="utf-8",
+          ) as handle:
+
+              config.write(handle)
+          '@
+
+
+          $script | python -
+
+
+          Write-Host ''
+          Write-Host '=== Settings that will ship in SDK ==='
+
+          Select-String `
+              -Path "$env:CRAFT_ROOT\etc\CraftSettings.ini" `
+              -Pattern '^(ABI|BuildType|UseCache|CreateCache|PackageDebugSymbols|DownloadDebugSymbolsCache)\s*=' |
+              ForEach-Object {
+                  Write-Host $_.Line
+              }
+
+
+      # -----------------------------------------------------------------------
+      # Remove MSYS from the exported SDK — but PROVE we don't need it first
+      # -----------------------------------------------------------------------
+
+      # The original 18-GB archive failure came from:
       #
-      # The files in craft-binary-cache are already Craft-created archives,
-      # so compression-level 0 avoids wasting CPU recompressing .7z files.
-      - name: Upload Wunjo dependency SDK
+      #     C:\CraftRoot\msys\etc\mtab
+      #
+      # Instead of special-casing mtab, move the entire dependency-building
+      # MSYS installation outside CraftRoot.
+      #
+      # Before keeping it out, configure Wunjo using exactly the intended local
+      # development stack:
+      #
+      #     MSVC 2022
+      #       +
+      #     CMake
+      #       +
+      #     Ninja
+      #       +
+      #     already-installed Craft dependencies
+      - name: Validate SDK without MSYS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+
+          $msys = (
+              "$env:CRAFT_ROOT\msys"
+          )
+
+          $savedMsys = (
+              "$env:RUNNER_TEMP\craft-msys-ci-only"
+          )
+
+
+          if (Test-Path $savedMsys) {
+              Remove-Item `
+                  $savedMsys `
+                  -Recurse `
+                  -Force
+          }
+
+
+          if (Test-Path $msys) {
+
+              Write-Host (
+                  "Moving CI-only MSYS out of CraftRoot..."
+              )
+
+              Move-Item `
+                  -Path $msys `
+                  -Destination $savedMsys
+          }
+
+
+          try {
+
+              function Clear-Host {}
+
+
+              & "$env:CRAFT_ROOT\craft\craftenv.ps1"
+
+
+              Write-Host ''
+              Write-Host '=== Local SDK toolchain ==='
+
+
+              cmake --version
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'CMake is unavailable.'
+              }
+
+
+              ninja --version
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Ninja is unavailable.'
+              }
+
+
+              $cl = Get-Command `
+                  cl.exe `
+                  -ErrorAction SilentlyContinue
+
+
+              if (-not $cl) {
+                  throw (
+                      'MSVC cl.exe is unavailable after ' +
+                      'loading craftenv.ps1.'
+                  )
+              }
+
+
+              Write-Host (
+                  "MSVC: " +
+                  $cl.Source
+              )
+
+
+              # -------------------------------------------------------------
+              # Verify Qt development package
+              # -------------------------------------------------------------
+
+              $qt = (
+                  Get-ChildItem `
+                      -Path $env:CRAFT_ROOT `
+                      -Filter Qt6Config.cmake `
+                      -Recurse `
+                      -File `
+                      -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+              )
+
+
+              if (-not $qt) {
+                  throw (
+                      'Qt6Config.cmake is missing from ' +
+                      'the installed SDK.'
+                  )
+              }
+
+
+              Write-Host (
+                  "Qt6: " +
+                  $qt.FullName
+              )
+
+
+              # -------------------------------------------------------------
+              # Verify FFmpeg DEVELOPMENT files, not merely DLLs
+              # -------------------------------------------------------------
+
+              $ffmpegHeader = (
+                  Get-ChildItem `
+                      -Path "$env:CRAFT_ROOT\include" `
+                      -Filter avcodec.h `
+                      -Recurse `
+                      -File `
+                      -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+              )
+
+
+              if (-not $ffmpegHeader) {
+                  throw (
+                      'FFmpeg development headers are ' +
+                      'missing from the installed SDK.'
+                  )
+              }
+
+
+              Write-Host (
+                  "FFmpeg: " +
+                  $ffmpegHeader.FullName
+              )
+
+
+              # -------------------------------------------------------------
+              # Configure Wunjo exactly as we intend to locally
+              # -------------------------------------------------------------
+
+              $configureDir = (
+                  "$env:RUNNER_TEMP\wunjo-sdk-configure-test"
+              )
+
+
+              Remove-Item `
+                  $configureDir `
+                  -Recurse `
+                  -Force `
+                  -ErrorAction SilentlyContinue
+
+
+              Write-Host ''
+              Write-Host (
+                  '=== Configuring Wunjo without MSYS ==='
+              )
+
+
+              cmake `
+                  -S "$env:GITHUB_WORKSPACE\portable" `
+                  -B $configureDir `
+                  -G Ninja `
+                  -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+                  -DBUILD_TESTING=OFF `
+                  -DRELEASE_BUILD=OFF
+
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw (
+                      'Wunjo CMake configuration failed ' +
+                      'without MSYS.'
+                  )
+              }
+
+
+              Write-Host ''
+              Write-Host (
+                  'Wunjo configured successfully without MSYS.'
+              )
+          }
+          catch {
+
+              # If validation fails, restore MSYS so later debugging still
+              # sees the original CraftRoot.
+              if (
+                  (Test-Path $savedMsys) -and
+                  (-not (Test-Path $msys))
+              ) {
+                  Move-Item `
+                      -Path $savedMsys `
+                      -Destination $msys
+              }
+
+              throw
+          }
+
+
+          # Success:
+          #
+          # Intentionally DO NOT move MSYS back.
+          #
+          # It now lives outside C:\CraftRoot and therefore cannot enter the
+          # development SDK archive.
+          Write-Host ''
+          Write-Host (
+              'MSYS validation passed. ' +
+              'MSYS remains outside the exported CraftRoot.'
+          )
+
+
+      # -----------------------------------------------------------------------
+      # Filesystem preflight
+      # -----------------------------------------------------------------------
+
+      # Do not assume that mtab was the only possible special filesystem entry.
+      #
+      # Before 7-Zip runs:
+      #
+      #   1. detect unexpected symlinks/junctions/reparse points;
+      #   2. verify every candidate regular file can actually be opened;
+      #   3. fail BEFORE compression if anything suspicious remains.
+      #
+      # This prevents 7-Zip from silently skipping an SDK file.
+      - name: Preflight SDK filesystem
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+
+          $root = (
+              [IO.Path]::GetFullPath(
+                  $env:CRAFT_ROOT
+              )
+          )
+
+
+          # Paths that the archive step deliberately excludes.
+          $excludedDirectories = @(
+
+              [IO.Path]::GetFullPath(
+                  "$root\build"
+              ),
+
+              [IO.Path]::GetFullPath(
+                  "$root\download"
+              ),
+
+              [IO.Path]::GetFullPath(
+                  "$root\logs"
+              ),
+
+              [IO.Path]::GetFullPath(
+                  "$root\tmp"
+              )
+          )
+
+
+          $excludedGitDirectories = @(
+
+              [IO.Path]::GetFullPath(
+                  "$root\craft\.git"
+              ),
+
+              [IO.Path]::GetFullPath(
+                  "$root\etc\blueprints\locations\craft-blueprints-kde\.git"
+              )
+          )
+
+
+          function Test-PathInsideDirectory {
+
+              param (
+                  [string] $Path,
+                  [string] $Directory
+              )
+
+
+              $fullPath = (
+                  [IO.Path]::GetFullPath(
+                      $Path
+                  )
+              )
+
+
+              $fullDirectory = (
+                  [IO.Path]::GetFullPath(
+                      $Directory
+                  )
+              )
+
+
+              if (
+                  $fullPath.Equals(
+                      $fullDirectory,
+                      [StringComparison]::OrdinalIgnoreCase
+                  )
+              ) {
+                  return $true
+              }
+
+
+              return $fullPath.StartsWith(
+                  $fullDirectory +
+                  [IO.Path]::DirectorySeparatorChar,
+
+                  [StringComparison]::OrdinalIgnoreCase
+              )
+          }
+
+
+          function Test-SDKExcluded {
+
+              param (
+                  [string] $Path
+              )
+
+
+              foreach (
+                  $excluded in
+                  $excludedDirectories +
+                  $excludedGitDirectories
+              ) {
+
+                  if (
+                      Test-PathInsideDirectory `
+                          -Path $Path `
+                          -Directory $excluded
+                  ) {
+                      return $true
+                  }
+              }
+
+
+              return $false
+          }
+
+
+          Write-Host ''
+          Write-Host '=== Checking reparse points ==='
+
+
+          $reparseErrors = @()
+
+
+          $reparsePoints = @(
+
+              Get-ChildItem `
+                  -LiteralPath $root `
+                  -Force `
+                  -Recurse `
+                  -Attributes ReparsePoint `
+                  -ErrorAction SilentlyContinue `
+                  -ErrorVariable +reparseErrors |
+
+              Where-Object {
+                  -not (
+                      Test-SDKExcluded `
+                          -Path $_.FullName
+                  )
+              }
+          )
+
+
+          if ($reparseErrors.Count -gt 0) {
+
+              Write-Host ''
+              Write-Host (
+                  'Filesystem enumeration produced errors:'
+              )
+
+              $reparseErrors |
+                  ForEach-Object {
+                      Write-Host (
+                          "  " +
+                          $_.Exception.Message
+                      )
+                  }
+
+              throw (
+                  'Could not safely enumerate the SDK ' +
+                  'filesystem.'
+              )
+          }
+
+
+          if ($reparsePoints.Count -gt 0) {
+
+              Write-Host ''
+              Write-Host (
+                  'Unexpected reparse points found:'
+              )
+
+
+              $reparsePoints |
+                  ForEach-Object {
+
+                      Write-Host (
+                          "  {0} | {1}" -f
+                          $_.Attributes,
+                          $_.FullName
+                      )
+                  }
+
+
+              throw (
+                  "Found $($reparsePoints.Count) unexpected " +
+                  'reparse point(s) in CraftRoot. ' +
+                  'Inspect them before archiving.'
+              )
+          }
+
+
+          Write-Host (
+              'No unexpected reparse points found.'
+          )
+
+
+          # ---------------------------------------------------------------
+          # Check every archive-candidate file for readability
+          # ---------------------------------------------------------------
+
+          Write-Host ''
+          Write-Host (
+              '=== Checking candidate file readability ==='
+          )
+
+
+          $enumerationErrors = @()
+
+
+          $files = @(
+
+              Get-ChildItem `
+                  -LiteralPath $root `
+                  -Force `
+                  -Recurse `
+                  -File `
+                  -ErrorAction SilentlyContinue `
+                  -ErrorVariable +enumerationErrors |
+
+              Where-Object {
+
+                  (-not (
+                      Test-SDKExcluded `
+                          -Path $_.FullName
+                  )) -and
+
+                  $_.Extension -ne '.pdb'
+              }
+          )
+
+
+          if ($enumerationErrors.Count -gt 0) {
+
+              Write-Host ''
+              Write-Host (
+                  'File enumeration produced errors:'
+              )
+
+
+              $enumerationErrors |
+                  ForEach-Object {
+
+                      Write-Host (
+                          "  " +
+                          $_.Exception.Message
+                      )
+                  }
+
+
+              throw (
+                  'Could not safely enumerate every ' +
+                  'candidate SDK file.'
+              )
+          }
+
+
+          $badFiles = (
+              [System.Collections.Generic.List[string]]::new()
+          )
+
+
+          $checked = 0
+
+
+          foreach ($file in $files) {
+
+              $checked++
+
+
+              try {
+
+                  $stream = (
+                      [System.IO.File]::Open(
+                          $file.FullName,
+
+                          [System.IO.FileMode]::Open,
+
+                          [System.IO.FileAccess]::Read,
+
+                          (
+                              [System.IO.FileShare]::ReadWrite `
+                              -bor `
+                              [System.IO.FileShare]::Delete
+                          )
+                      )
+                  )
+
+
+                  $stream.Dispose()
+              }
+              catch {
+
+                  $badFiles.Add(
+                      $file.FullName
+                  )
+              }
+          }
+
+
+          Write-Host (
+              "Files checked: $checked"
+          )
+
+
+          if ($badFiles.Count -gt 0) {
+
+              Write-Host ''
+              Write-Host 'Unreadable files:'
+
+
+              $badFiles |
+                  ForEach-Object {
+                      Write-Host "  $_"
+                  }
+
+
+              throw (
+                  "$($badFiles.Count) SDK file(s) " +
+                  'cannot be safely read for packaging.'
+              )
+          }
+
+
+          Write-Host (
+              'All archive candidate files are readable.'
+          )
+
+
+      # -----------------------------------------------------------------------
+      # Create ONE complete preinstalled SDK
+      # -----------------------------------------------------------------------
+
+      - name: Create pruned installed SDK archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # We explicitly handle native process exit codes ourselves.
+          $PSNativeCommandUseErrorActionPreference = $false
+
+
+          $sevenZip = (
+              "$env:CRAFT_ROOT\dev-utils\bin\7za.exe"
+          )
+
+
+          if (-not (Test-Path $sevenZip)) {
+              throw (
+                  "7-Zip is missing: $sevenZip"
+              )
+          }
+
+
+          $archive = (
+              "$env:RUNNER_TEMP\wunjo-dev-sdk-msvc2022-x64.7z"
+          )
+
+
+          Remove-Item `
+              $archive `
+              -Force `
+              -ErrorAction SilentlyContinue
+
+
+          # ---------------------------------------------------------------
+          # Report original installed size
+          # ---------------------------------------------------------------
+
+          Write-Host ''
+          Write-Host '=== Installed CraftRoot ==='
+
+
+          $allBytes = (
+              Get-ChildItem `
+                  -Path $env:CRAFT_ROOT `
+                  -Recurse `
+                  -File `
+                  -ErrorAction SilentlyContinue |
+
+              Measure-Object `
+                  -Property Length `
+                  -Sum
+          ).Sum
+
+
+          Write-Host (
+              "Before archive exclusions: {0:N2} GiB" -f
+              ($allBytes / 1GB)
+          )
+
+
+          # ---------------------------------------------------------------
+          # Archive arguments
+          # ---------------------------------------------------------------
+
+          $arguments = @(
+
+              'a',
+
+              '-t7z',
+
+              # Bandwidth matters more than CI CPU time.
+              '-mx=9',
+
+              '-mmt=on',
+
+              $archive,
+
+              '.\CraftRoot\*',
+
+
+              # -----------------------------------------------------------
+              # Build/download workspaces are not part of the SDK.
+              # -----------------------------------------------------------
+
+              '-xr!CraftRoot\build',
+              '-xr!CraftRoot\build\*',
+
+              '-xr!CraftRoot\download',
+              '-xr!CraftRoot\download\*',
+
+              '-xr!CraftRoot\logs',
+              '-xr!CraftRoot\logs\*',
+
+              '-xr!CraftRoot\tmp',
+              '-xr!CraftRoot\tmp\*',
+
+
+              # -----------------------------------------------------------
+              # Dependency-building MSYS is intentionally omitted.
+              # The validation step already proved Wunjo configuration works
+              # without it.
+              # -----------------------------------------------------------
+
+              '-xr!CraftRoot\msys',
+              '-xr!CraftRoot\msys\*',
+
+
+              # -----------------------------------------------------------
+              # Git history is unnecessary for compiling local Wunjo.
+              # -----------------------------------------------------------
+
+              '-xr!CraftRoot\craft\.git',
+              '-xr!CraftRoot\craft\.git\*',
+
+              '-xr!CraftRoot\etc\blueprints\locations\craft-blueprints-kde\.git',
+              '-xr!CraftRoot\etc\blueprints\locations\craft-blueprints-kde\.git\*',
+
+
+              # -----------------------------------------------------------
+              # Dependency PDBs can be very large and are not needed for the
+              # normal Wunjo/TMDB incremental development loop.
+              # -----------------------------------------------------------
+
+              '-xr!*.pdb'
+          )
+
+
+          # Running from C:\ means the archive receives a top-level:
+          #
+          #     CraftRoot\
+          #
+          # Therefore extracting the archive to C:\ creates:
+          #
+          #     C:\CraftRoot
+          Push-Location C:\
+
+
+          try {
+
+              & $sevenZip @arguments
+
+              $archiveExit = $LASTEXITCODE
+          }
+          finally {
+
+              Pop-Location
+          }
+
+
+          # ---------------------------------------------------------------
+          # STRICT 7-Zip handling
+          # ---------------------------------------------------------------
+          #
+          # Exit code 1 means WARNING.
+          #
+          # We do NOT accept it.
+          #
+          # An archive can pass `7z t` even if an unreadable source file was
+          # skipped during creation, so only exit code 0 is acceptable.
+          # ---------------------------------------------------------------
+
+          if ($archiveExit -ne 0) {
+
+              throw (
+                  '7-Zip did not complete cleanly. ' +
+                  "Exit code: $archiveExit"
+              )
+          }
+
+
+          if (-not (Test-Path $archive)) {
+
+              throw (
+                  'SDK archive was not created.'
+              )
+          }
+
+
+          # ---------------------------------------------------------------
+          # Integrity test
+          # ---------------------------------------------------------------
+
+          Write-Host ''
+          Write-Host '=== Testing SDK archive ==='
+
+
+          & $sevenZip `
+              t `
+              $archive
+
+
+          if ($LASTEXITCODE -ne 0) {
+
+              throw (
+                  '7-Zip integrity test failed for ' +
+                  'the SDK archive.'
+              )
+          }
+
+
+          # ---------------------------------------------------------------
+          # Hash + metadata
+          # ---------------------------------------------------------------
+
+          $archiveBytes = (
+              Get-Item $archive
+          ).Length
+
+
+          $hash = Get-FileHash `
+              $archive `
+              -Algorithm SHA256
+
+
+          $hash.Hash |
+              Set-Content `
+                  "$archive.sha256" `
+                  -Encoding ascii
+
+
+          Write-Host ''
+          Write-Host (
+              "SDK archive: {0:N2} GiB ({1:N0} bytes)" -f
+              ($archiveBytes / 1GB),
+              $archiveBytes
+          )
+
+          Write-Host (
+              "SHA256: " +
+              $hash.Hash
+          )
+
+
+          @{
+              abi = $env:CRAFT_ABI
+
+              buildType = (
+                  'RelWithDebInfo'
+              )
+
+              wunjoCommit = (
+                  $env:GITHUB_SHA
+              )
+
+              repository = (
+                  $env:GITHUB_REPOSITORY
+              )
+
+              createdUtc = (
+                  [DateTime]::UtcNow.ToString('o')
+              )
+
+              archive = (
+                  'wunjo-dev-sdk-msvc2022-x64.7z'
+              )
+
+              archiveBytes = (
+                  $archiveBytes
+              )
+
+              sha256 = (
+                  $hash.Hash
+              )
+
+              extractTo = (
+                  'C:\'
+              )
+
+              installedPrefix = (
+                  'C:\CraftRoot'
+              )
+
+              excluded = @(
+
+                  'build',
+
+                  'download',
+
+                  'logs',
+
+                  'tmp',
+
+                  'msys',
+
+                  'dependency PDBs',
+
+                  'Craft git history',
+
+                  'Craft blueprint git history'
+              )
+          } |
+              ConvertTo-Json `
+                  -Depth 4 |
+              Set-Content `
+                  "$env:GITHUB_WORKSPACE\sdk-info.json" `
+                  -Encoding utf8
+
+
+      # -----------------------------------------------------------------------
+      # Local setup instructions included in artifact
+      # -----------------------------------------------------------------------
+
+      - name: Write local setup instructions
+        shell: pwsh
+        run: |
+          @'
+          Wunjo Windows local-development SDK
+          ===================================
+
+
+          IMPORTANT
+          ---------
+
+          Qt, KF6, FFmpeg, MLT, OpenCV, KDDockWidgets,
+          OpenTimelineIO and the other Wunjo development dependencies
+          are ALREADY INSTALLED inside this SDK.
+
+          Do NOT rebuild or redownload those dependencies locally.
+
+
+          STEP 1 — Extract the SDK
+          ------------------------
+
+          Extract:
+
+              wunjo-dev-sdk-msvc2022-x64.7z
+
+          directly to:
+
+              C:\
+
+
+          After extraction these paths must exist:
+
+              C:\CraftRoot\craft\craftenv.ps1
+              C:\CraftRoot\include
+              C:\CraftRoot\lib
+              C:\CraftRoot\bin
+              C:\CraftRoot\dev-utils
+
+
+          STEP 2 — Clone your Wunjo fork
+          -------------------------------
+
+          PowerShell:
+
+              Set-Location C:\Users\ACER\Desktop
+
+              git clone `
+                https://github.com/kevinn-s/wunjo.wladradchenko.ru.git `
+                wunjo
+
+              Set-Location .\wunjo
+
+
+          STEP 3 — Load the SDK environment
+          ----------------------------------
+
+          PowerShell:
+
+              function Clear-Host {}
+
+              & C:\CraftRoot\craft\craftenv.ps1
+
+
+          STEP 4 — Configure Wunjo itself
+          -------------------------------
+
+              cmake `
+                -S .\portable `
+                -B .\build-windows `
+                -G Ninja `
+                -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+                -DBUILD_TESTING=OFF `
+                -DRELEASE_BUILD=OFF
+
+
+          STEP 5 — Build Wunjo / TMDB only
+          ---------------------------------
+
+              cmake `
+                --build .\build-windows `
+                --parallel 2
+
+
+          NORMAL DEVELOPMENT LOOP
+          -----------------------
+
+          After modifying Wunjo or TMDB source:
+
+              cmake `
+                --build .\build-windows `
+                --parallel 2
+
+
+          You should NOT need to run:
+
+              craft --install-deps ...
+
+          on the local machine.
+
+
+          MSYS
+          ----
+
+          The SDK intentionally excludes Craft's MSYS installation.
+
+          Dependency building already happened on GitHub.
+
+          Before packaging this SDK, GitHub Actions hides MSYS and performs
+          a real Wunjo CMake configuration using:
+
+              MSVC 2022
+              CMake
+              Ninja
+              installed Craft dependencies
+
+          The SDK is only produced if that validation succeeds.
+          '@ |
+              Set-Content `
+                  "$env:GITHUB_WORKSPACE\LOCAL_SETUP.txt" `
+                  -Encoding utf8
+
+
+      # -----------------------------------------------------------------------
+      # Upload ONE downloadable development SDK
+      # -----------------------------------------------------------------------
+
+      # The .7z is already strongly compressed.
+      #
+      # compression-level: 0 prevents GitHub from wasting CPU trying to
+      # recompress the archive.
+      #
+      # The tiny Craft cache/shelf files are included as recovery/reproducibility
+      # metadata, but your PC normally only needs the .7z.
+      - name: Upload complete local-development SDK
         uses: actions/upload-artifact@v4
         with:
-          name: wunjo-craft-deps-msvc2022-x64
+          name: wunjo-dev-sdk-msvc2022-x64
+
           path: |
-            craft-binary-cache/
+            ${{ runner.temp }}/wunjo-dev-sdk-msvc2022-x64.7z
+            ${{ runner.temp }}/wunjo-dev-sdk-msvc2022-x64.7z.sha256
             wunjo-windows.craft.shelf
             installed-packages.txt
             sdk-info.json
+            LOCAL_SETUP.txt
+            craft-binary-cache/
+
           if-no-files-found: error
+
           compression-level: 0
+
           retention-days: 30
