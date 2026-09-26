@@ -1,4 +1,4 @@
-name: Export Windows Development SDK
+name: Build Windows Craft Dependency SDK
 
 on:
   workflow_dispatch:
@@ -10,90 +10,369 @@ env:
   CRAFT_ROOT: C:\CraftRoot
   CRAFT_ABI: windows-cl-msvc2022-x86_64
 
+  # This is NOT CraftRoot.
+  # Craft places only locally-created binary cache packages here.
+  CRAFT_BINARY_CACHE: ${{ github.workspace }}\craft-binary-cache
+
+  # ownCloud uses Craft's shelf mechanism to record the exact installed
+  # dependency versions. We do the same for Wunjo.
+  CRAFT_SHELF: ${{ github.workspace }}\wunjo-windows.craft.shelf
+
 jobs:
-  export-sdk:
+  dependency-sdk:
+    name: Build Wunjo dependency cache
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 180
 
     steps:
-      - name: Restore Craft dependency cache
-        uses: actions/cache/restore@v4
-        id: craft-cache
+      - name: Checkout Wunjo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          path: |
-            ${{ env.CRAFT_ROOT }}
-            !${{ env.CRAFT_ROOT }}/build
-            !${{ env.CRAFT_ROOT }}/download
-          key: craft-${{ env.CRAFT_ABI }}-sdk-export
-          restore-keys: |
-            craft-${{ env.CRAFT_ABI }}-
+          python-version: '3.13'
 
-      - name: Verify Craft cache was restored
+      # Same Windows/Craft cleanup used by Wunjo's successful build.
+      # Git's sh.exe, Strawberry Perl and the preinstalled MinGW can interfere
+      # with a Craft MSVC environment.
+      - name: Clean conflicting tools from PATH
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = 'Stop'
 
-          if ("${{ steps.craft-cache.outputs.cache-matched-key }}" -eq "") {
-              throw "No Craft cache was found."
+          $env:PATH = ($env:PATH -split ';' | Where-Object {
+            $_ -notmatch 'mingw' -and
+            $_ -notmatch 'Strawberry' -and
+            $_ -notmatch 'Git\\bin'
+          }) -join ';'
+
+          "PATH=$env:PATH" |
+            Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+          foreach ($tool in @('sh', 'gcc', 'g++', 'cpp')) {
+            $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+
+            if ($cmd) {
+              Write-Host "$tool still on PATH: $($cmd.Source)"
+            }
+            else {
+              Write-Host "$tool removed from PATH"
+            }
           }
 
-          Write-Host "Restored cache:"
-          Write-Host "${{ steps.craft-cache.outputs.cache-matched-key }}"
+          Write-Host "git: $((Get-Command git).Source)"
 
-          if (-not (Test-Path "$env:CRAFT_ROOT\craft\craftenv.ps1")) {
-              throw "CraftRoot is incomplete: craftenv.ps1 is missing."
-          }
-
-          if (-not (Test-Path "$env:CRAFT_ROOT\include")) {
-              throw "CraftRoot is incomplete: include directory is missing."
-          }
-
-          if (-not (Test-Path "$env:CRAFT_ROOT\lib")) {
-              throw "CraftRoot is incomplete: lib directory is missing."
-          }
-
-          Write-Host "CraftRoot successfully restored."
-
-      - name: Show Craft configuration
+      # Use the same Craft source/bootstrap arrangement that already produced
+      # a successful Wunjo build on this repository.
+      - name: Fetch KDE Craft
         shell: pwsh
         run: |
-          Get-Content "$env:CRAFT_ROOT\etc\CraftSettings.ini"
+          $ErrorActionPreference = 'Stop'
 
-      - name: Create SDK archive
+          Invoke-WebRequest `
+            -Uri https://raw.githubusercontent.com/KDE/craft/master/setup/CraftBootstrap.py `
+            -OutFile CraftBootstrap.py
+
+          git clone `
+            --depth 1 `
+            --branch master `
+            https://github.com/KDE/craft.git `
+            craft-src
+
+      # GitHub's windows-2022 runner defines ANDROID_SDK_ROOT.
+      # Craft checks only whether that variable EXISTS, which can otherwise
+      # incorrectly select Android's MinSizeRel build type.
+      - name: Bootstrap Craft for MSVC 2022
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = 'Stop'
 
-          $archive = "$env:RUNNER_TEMP\wunjo-sdk-msvc2022-x64.7z"
+          Remove-Item Env:ANDROID_SDK_ROOT -ErrorAction SilentlyContinue
+          Remove-Item Env:ANDROID_HOME -ErrorAction SilentlyContinue
 
-          & "C:\Program Files\7-Zip\7z.exe" `
-              a `
-              -t7z `
-              -mx=3 `
-              $archive `
-              "$env:CRAFT_ROOT\*"
+          python CraftBootstrap.py `
+            --prefix $env:CRAFT_ROOT `
+            --branch master `
+            --use-defaults `
+            --localDev craft-src
 
-          if (-not (Test-Path $archive)) {
-              throw "SDK archive was not created."
+      # Configure Craft in the same conceptual way ownCloud does:
+      #
+      #   UseCache    = consume prebuilt binary packages
+      #   CreateCache = package anything that had to be built locally
+      #
+      # Therefore:
+      #
+      # KDE cache hit  -> download it, don't duplicate it in our artifact.
+      # KDE cache miss -> GitHub builds it and Craft stores a binary package
+      #                   in CRAFT_BINARY_CACHE.
+      - name: Configure Craft binary cache
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $env:CRAFT_BINARY_CACHE |
+            Out-Null
+
+          $script = @'
+          import configparser
+          import os
+          from pathlib import Path
+
+          settings_path = (
+              Path(os.environ["CRAFT_ROOT"])
+              / "etc"
+              / "CraftSettings.ini"
+          )
+
+          config = configparser.RawConfigParser()
+          config.optionxform = str
+          config.read(settings_path, encoding="utf-8")
+
+          values = {
+              "General": {
+                  "ABI": os.environ["CRAFT_ABI"],
+              },
+
+              "Compile": {
+                  "BuildType": "RelWithDebInfo",
+              },
+
+              "ContinuousIntegration": {
+                  "Enabled": "False",
+
+                  # We are building our own supplemental repository.
+                  # Do not merge the remote KDE manifest into it.
+                  "UpdateRepository": "False",
+              },
+
+              "Packager": {
+                  # First try a binary package.
+                  "UseCache": "True",
+
+                  # If one does not exist and Craft builds the dependency,
+                  # make a binary package from that result.
+                  "CreateCache": "True",
+
+                  "CacheDir": Path(
+                      os.environ["CRAFT_BINARY_CACHE"]
+                  ).as_posix(),
+
+                  # Development symbols/sources would make the dependency
+                  # artifact much larger and are not needed for our Wunjo
+                  # incremental-build setup.
+                  "PackageDebugSymbols": "False",
+                  "PackageSrc": "False",
+              },
           }
 
-          $hash = Get-FileHash $archive -Algorithm SHA256
+          for section, options in values.items():
+              if not config.has_section(section):
+                  config.add_section(section)
 
-          $hash.Hash |
-              Set-Content "$archive.sha256" -Encoding ascii
+              for key, value in options.items():
+                  config.set(section, key, value)
 
-          Write-Host "SDK archive:"
-          Write-Host $archive
-          Write-Host "SHA256:"
-          Write-Host $hash.Hash
+          with settings_path.open(
+              "w",
+              encoding="utf-8",
+          ) as handle:
+              config.write(handle)
+          '@
 
-      - name: Upload development SDK
+          $script | python -
+
+          Write-Host '=== Effective Craft settings ==='
+
+          Select-String `
+            -Path "$env:CRAFT_ROOT\etc\CraftSettings.ini" `
+            -Pattern '^(ABI|BuildType|UseCache|CreateCache|CacheDir|PackageDebugSymbols)\s*=' |
+            ForEach-Object {
+              Write-Host $_.Line
+            }
+
+      - name: Verify Craft ABI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $match = Select-String `
+            -Path "$env:CRAFT_ROOT\etc\CraftSettings.ini" `
+            -Pattern '^ABI\s*=\s*(.+)$'
+
+          if (-not $match) {
+            throw 'Craft ABI is missing from CraftSettings.ini.'
+          }
+
+          $abi = $match.Matches.Groups[1].Value.Trim()
+
+          Write-Host "Craft ABI: $abi"
+
+          if ($abi -ne $env:CRAFT_ABI) {
+            throw "Craft ABI is '$abi'; expected '$env:CRAFT_ABI'."
+          }
+
+      # Wunjo carries its own Craft blueprint repository inside portable/.
+      - name: Register Wunjo Craft blueprints
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          python `
+            portable\packaging\craft\register-blueprint.py
+
+      # This is the important step.
+      #
+      # --install-deps means Wunjo itself is NOT built.
+      #
+      # --use-cache means Craft first tries KDE's official cache.
+      #
+      # --create-cache means a dependency which is missing from KDE's cache is
+      # built on the GitHub runner and converted into a reusable Craft binary
+      # package.
+      - name: Build Wunjo dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # craftenv.ps1 clears the console. GitHub's non-interactive
+          # PowerShell does not provide the console handle Clear-Host expects.
+          function Clear-Host {}
+
+          & "$env:CRAFT_ROOT\craft\craftenv.ps1"
+
+          craft `
+            --ci-mode `
+            --use-cache `
+            --create-cache `
+            --install-deps `
+            --options "wunjo.srcDir=$env:GITHUB_WORKSPACE\portable" `
+            wunjo
+
+      # This is directly based on ownCloud's approach.
+      #
+      # The shelf records exact installed package versions/revisions rather
+      # than shipping the installed CraftRoot filesystem.
+      - name: Create Craft dependency shelf
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          function Clear-Host {}
+
+          & "$env:CRAFT_ROOT\craft\craftenv.ps1"
+
+          craft `
+            --ci-mode `
+            --shelve "$env:CRAFT_SHELF"
+
+          craft `
+            --ci-mode `
+            --print-installed |
+            Set-Content `
+              "$env:GITHUB_WORKSPACE\installed-packages.txt" `
+              -Encoding utf8
+
+          Write-Host '=== Shelf ==='
+          Get-Content $env:CRAFT_SHELF
+
+      # We expect Craft's cache to have the following conceptual layout:
+      #
+      # craft-binary-cache/
+      #   26.05/
+      #     windows/
+      #       cl/
+      #         msvc2022/
+      #           x86_64/
+      #             RelWithDebInfo/
+      #               manifest.json
+      #               ...
+      #
+      # Only packages KDE did not already provide need to appear here.
+      - name: Verify dependency SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if (-not (Test-Path $env:CRAFT_SHELF)) {
+            throw 'Craft shelf was not created.'
+          }
+
+          $manifest = Get-ChildItem `
+            -Path $env:CRAFT_BINARY_CACHE `
+            -Filter manifest.json `
+            -Recurse `
+            -File |
+            Select-Object -First 1
+
+          if (-not $manifest) {
+            throw 'No Craft binary-cache manifest was created.'
+          }
+
+          $archives = @(
+            Get-ChildItem `
+              -Path $env:CRAFT_BINARY_CACHE `
+              -Filter *.7z `
+              -Recurse `
+              -File
+          )
+
+          Write-Host "Binary cache manifest:"
+          Write-Host $manifest.FullName
+
+          Write-Host (
+            "Supplemental binary packages: {0}" -f
+            $archives.Count
+          )
+
+          $bytes = (
+            Get-ChildItem `
+              -Path $env:CRAFT_BINARY_CACHE `
+              -Recurse `
+              -File |
+            Measure-Object `
+              -Property Length `
+              -Sum
+          ).Sum
+
+          Write-Host (
+            "Supplemental cache size: {0:N2} MiB" -f
+            ($bytes / 1MB)
+          )
+
+      - name: Write SDK metadata
+        shell: pwsh
+        run: |
+          @{
+            abi = $env:CRAFT_ABI
+            buildType = 'RelWithDebInfo'
+            wunjoCommit = $env:GITHUB_SHA
+            repository = $env:GITHUB_REPOSITORY
+            createdUtc = [DateTime]::UtcNow.ToString('o')
+            purpose = 'Wunjo local-development Craft dependency cache'
+          } |
+            ConvertTo-Json |
+            Set-Content `
+              "$env:GITHUB_WORKSPACE\sdk-info.json" `
+              -Encoding utf8
+
+      # Do NOT archive C:\CraftRoot.
+      #
+      # The files in craft-binary-cache are already Craft-created archives,
+      # so compression-level 0 avoids wasting CPU recompressing .7z files.
+      - name: Upload Wunjo dependency SDK
         uses: actions/upload-artifact@v4
         with:
-          name: wunjo-sdk-msvc2022-x64
+          name: wunjo-craft-deps-msvc2022-x64
           path: |
-            ${{ runner.temp }}/wunjo-sdk-msvc2022-x64.7z
-            ${{ runner.temp }}/wunjo-sdk-msvc2022-x64.7z.sha256
+            craft-binary-cache/
+            wunjo-windows.craft.shelf
+            installed-packages.txt
+            sdk-info.json
+          if-no-files-found: error
           compression-level: 0
           retention-days: 30
-          if-no-files-found: error
