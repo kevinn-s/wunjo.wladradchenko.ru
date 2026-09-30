@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <!DOCTYPE kpartgui SYSTEM "kpartgui.dtd">
-<kpartgui name="wunjo" version="252" translationDomain="wunjo">
+<kpartgui name="wunjo" version="253" translationDomain="wunjo">
   <MenuBar>
     <Menu name="file">
       <Action name="file_new"/>
@@ -50,6 +50,7 @@
       <Action name="show_titlebars"/>
       <Separator/>
       <ActionList name="dock_actions"/>
+      <Action name="raise_streamable"/>
     </Menu>
     <Menu name="go" noMerge="1">
       <text>Media</text>

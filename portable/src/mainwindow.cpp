@@ -55,6 +55,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 #include "monitor/monitormanager.h"
 #include "plugins/pluginmanager.h"
 #include "scripting/scriptingserver.h"
+#include <streamable/Streamable.h>
 #include "monitor/scopes/audiographspectrum.h"
 #include "onlineresources/resourcewidget.hpp"
 #include "profiles/profilemodel.hpp"
@@ -391,6 +392,10 @@ void MainWindow::init()
 
     connect(onlineResources, &ResourceWidget::addClip, this, &MainWindow::slotAddProjectClip);
     connect(onlineResources, &ResourceWidget::addLicenseInfo, this, &MainWindow::slotAddTextNote);
+
+    auto *streamableWidget = new Streamable::StreamableWidget(this);
+    m_streamableDock = addDock(i18n("Streamable"), QStringLiteral("streamable"), streamableWidget);
+    m_streamableDock->close();
 
     const QSize stackSize(firstWindowSize.width() * 0.3, 0);
     m_effectStackDock =

@@ -64,6 +64,7 @@ add_subdirectory(render)
 add_subdirectory(renderpresets)
 add_subdirectory(scopes)
 add_subdirectory(scripting)
+add_subdirectory(../apps/streamable apps_streamable)
 add_subdirectory(timeline2)
 add_subdirectory(titler)
 add_subdirectory(transitions)
@@ -249,6 +250,7 @@ install(TARGETS wunjo DESTINATION ${KDE_INSTALL_BINDIR})
 target_include_directories(wunjoLib PRIVATE
     ${CMAKE_BINARY_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../apps/streamable/src
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/external
     ${CMAKE_CURRENT_SOURCE_DIR}/lib
     ${CMAKE_CURRENT_SOURCE_DIR}/monitor

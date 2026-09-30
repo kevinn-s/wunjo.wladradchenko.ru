@@ -305,6 +305,7 @@ private:
     ChatWidget *m_chatWidget{nullptr};
     KDDockWidgets::QtWidgets::DockWidget *m_mixerDock{nullptr};
     KDDockWidgets::QtWidgets::DockWidget *m_onlineResourcesDock{nullptr};
+    KDDockWidgets::QtWidgets::DockWidget *m_streamableDock{nullptr};
 
     KSelectAction *m_timeFormatButton;
     QAction *m_compositeAction;

@@ -55,5 +55,5 @@ if ($BuildOnly) {
     return
 }
 
-Start-Process -FilePath $wunjoExe
+Start-Process -FilePath $wunjoExe -WorkingDirectory $repo
 Write-Host "Launched: $wunjoExe"

@@ -31,10 +31,11 @@ tracker above — not to them.
 - **Scripting**: a local socket serving the editor's methods, driven by the MCP server
   in `mcp` — see `dev-docs/dbus-removal-checklist.md` for why it is not D-Bus
 
-## Building
+## Development & Building
 
 The supported build is the flatpak one; see `CLAUDE.md` in this directory for the exact
 command, and `dev-docs/build.md` for building against a system Qt/KF6.
+For project-specific coding standards, architecture paradigms, and LLM guidelines, please refer to `AGENTS.md`.
 
 ## Licence
 
